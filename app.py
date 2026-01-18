@@ -675,59 +675,51 @@ def garch_model():
 @st.cache_resource
 def prepare_forecast_data(option, start_forecast, end_date):
     """
-    Prepares forecast data by merging and filtering datasets, dropping rows where CAC close prices are NA.
-
-    Parameters:
-    - option: str, the stock or index to download
-    - start_forecast: datetime.date, start date for forecast data
-    - end_date: datetime.date, end date for forecast data
-
-    Returns:
-    - pd.DataFrame, processed forecast data
+    Prépare les données pour la prédiction en évitant de demander des prix futurs.
     """
-    # Download and merge data
+    # Limiter end_date à aujourd'hui
+    end_date = min(end_date, date.today())
+
+    # Télécharger les données historiques
     new_data_forecast = download_data(option, start_forecast, end_date)
 
-    # Add one more trading day to forecast data t+1 data
-    next_trading_day = end_date #+ timedelta(days=1)
-    while next_trading_day.weekday() in [5, 6]:  # Skip weekends
-        next_trading_day += timedelta(days=1)
+    # Prochain jour de trading pour compléter les données (s'il est avant aujourd'hui)
+    next_trading_day = end_date
+    while next_trading_day.weekday() in [5, 6]:  # sauter weekends
+        next_trading_day -= timedelta(days=1)
 
-    # get close price of the next trading day if availabe
-    stock_data = yf.Ticker(option).history(start=next_trading_day, end=next_trading_day + pd.Timedelta(days=1))
+    # Télécharger le prix du next_trading_day uniquement si c'est <= today
+    stock_data = pd.DataFrame()
+    if next_trading_day <= date.today():
+        stock_data = yf.Ticker(option).history(
+            start=next_trading_day, 
+            end=next_trading_day + pd.Timedelta(days=1)
+        )
 
-    niveau_row = {
-        "Date": pd.Timestamp(next_trading_day),
-        "Close": stock_data["Close"].values[0] if not stock_data["Close"].empty else 0,
-        "High": stock_data["High"].values[0] if not stock_data["High"].empty else 0,
-        "Low": stock_data["Low"].values[0] if not stock_data["Low"].empty else 0,
-        "Open": stock_data["Open"].values[0] if not stock_data["Open"].empty else 0,
-        "Volume": stock_data["Volume"].values[0] if not stock_data["Volume"].empty else 0
-    }
+    if not stock_data.empty:
+        niveau_row = {
+            "Date": pd.Timestamp(next_trading_day),
+            "Close": stock_data["Close"].values[0],
+            "High": stock_data["High"].values[0],
+            "Low": stock_data["Low"].values[0],
+            "Open": stock_data["Open"].values[0],
+            "Volume": stock_data["Volume"].values[0]
+        }
+        new_data_forecast = pd.concat([new_data_forecast, pd.DataFrame([niveau_row])], ignore_index=True)
 
-    new_data_forecast = pd.concat([new_data_forecast, pd.DataFrame([niveau_row])], ignore_index=True)
-
-    # Download economic data for forecast period (exclude weekends days on economic data)
+    # Télécharger les données économiques
     eco_data_forecast = download_eco_data(start_forecast, next_trading_day)
     eco_data_forecast = eco_data_forecast[eco_data_forecast['Date'].dt.weekday < 5]
 
-    # Merge datasets
+    # Fusionner et ajouter indicateurs
     data_forecast = pd.merge(new_data_forecast, eco_data_forecast, on="Date", how="right")
-
-    # Drop rows where CAC close prices are NA (eg. french holidays)
     data_forecast = data_forecast.dropna(subset=['Close'])
-
-    # Reset to na for the next trading day if values is empty
-    data_forecast.loc[data_forecast['Close']==0, 'Close'] = np.nan
-
-    # Add indicators 
     data_forecast = add_indicators(data_forecast, shift_values=True)
-
-    # Ensure 'Date' is properly set as index
     data_forecast['Date'] = pd.to_datetime(data_forecast['Date'])
     data_forecast.index = data_forecast['Date']
 
     return data_forecast
+
 
 def predict():
 
