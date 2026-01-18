@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import time
+time.sleep(1) # to avoid streamlit cache issue
 from ta.momentum import RSIIndicator
 from datetime import date
 from sklearn.preprocessing import StandardScaler
