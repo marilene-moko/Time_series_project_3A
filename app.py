@@ -176,8 +176,8 @@ def add_indicators(dataset, shift_values=False):
 
 def get_date_range():
     min_date = date(2000, 1, 1)
-    max_date = date(2027, 1, 1)
-    today = date.today()
+    max_date = date(2026, 1, 1)
+    today = min(date.today(), max_date)
     fixed_start_date = max(today - timedelta(days=365), min_date)
 
     st.sidebar.write("Select date dange for visualisation")
