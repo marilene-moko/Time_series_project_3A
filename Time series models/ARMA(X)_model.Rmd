@@ -1,0 +1,706 @@
+---
+title: "ARMA_ARMAX_models"
+author: "BOUILLON Mathis"
+date: "2024-12-12"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+ 
+
+
+```{r, include = FALSE}
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("tseries")) install.packages("tseries")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("forecast")) install.packages("forecast")
+
+library(dplyr)
+library(tidyverse)
+library(tseries)
+library(ggplot2)
+library(readr)
+library(forecast)
+
+
+```
+
+
+
+Loading final database : 
+
+```{r}
+final_database <- readr::read_csv("../data/output/final_database.csv", show_col_types = FALSE)
+final_database$Date <- as.Date(final_database$Date)
+
+numeric_columns <- setdiff(names(final_database), "Date")  
+final_database[numeric_columns] <- lapply(final_database[numeric_columns], as.numeric)
+
+```
+
+
+# ARIMA model :  
+
+First, we split the data between train and test : 
+```{r}
+
+train_data <- final_database %>% filter(Date < "2023-01-01")
+test_data <- final_database %>% filter(Date >= "2023-01-01")
+
+```
+
+Then, we analyse the ACF and PACF of closing prices and Returns : 
+```{r}
+acf(train_data$Close)
+pacf(train_data$Close)
+acf(train_data$Return)
+pacf(train_data$Return)
+```
+
+It clearly appears that the closing prices are not stationnary. 
+If we observe the ACF of the Return, it appears that lags superior or equal to the first one is not significant. 
+For the PACF, lags are not significant in the beginning, but becomes significant for lags after. 
+
+
+## On closing prices : 
+
+as the ACF and PACF are hard to interprete here, we will test values for p and q between 1 and 6, and select the best model based on AIC : 
+
+```{r}
+# Define parameters for ARMA models
+p_values <- 1:6  # p values
+q_values <- 1:6  # q values
+
+# Store models and their results
+models <- list()
+valid_models <- list()
+aic_values <- c()
+bic_values <- c()
+box_test_results <- list()
+
+# Fit ARMA models and check for white noise in residuals on the train dataset
+for (p in p_values) {
+  for (q in q_values) {
+    model_name <- paste0("ARIMA", p, q)
+    
+    # Fit ARMA(p, q) model on train_data$Close
+    models[[model_name]] <- arima(train_data$Close, order = c(p, 1, q))
+    
+    # Get residuals and perform Ljung-Box test
+    resid <- residuals(models[[model_name]])
+    box_test <- Box.test(resid, lag = 30)
+    
+    # Store test results
+    box_test_results[[model_name]] <- box_test
+    
+    # If residuals are white (p-value > 0.05), add to valid models list
+    if (box_test$p.value > 0.05) {
+      valid_models[[model_name]] <- models[[model_name]]
+      aic_values[model_name] <- AIC(models[[model_name]])
+      bic_values[model_name] <- BIC(models[[model_name]])
+    }
+  }
+}
+
+# Display white noise test results
+cat("White noise test results for residuals (p-value):\n")
+for (model_name in names(box_test_results)) {
+  cat(model_name, ": p-value =", box_test_results[[model_name]]$p.value, "\n")
+}
+
+# Evaluate only valid models
+if (length(valid_models) > 0) {
+  cat("\nAIC and BIC criteria for valid models:\n")
+  aic_results <- data.frame(Model = names(aic_values), AIC = aic_values, BIC = bic_values)
+  print(aic_results[order(aic_results$AIC), ])  # Sort by AIC
+
+  # Identify the best model based on AIC among valid models
+  best_model <- names(which.min(aic_values))
+  cat("\nBest model based on AIC among valid models:", best_model, "\n")
+} else {
+  cat("\nNo model passed the white noise test for residuals.\n")
+}
+
+
+```
+
+The best model is an ARIMA(5,1,4)
+Thus, we adjust such a model on our training sample, and look at the in-sample predictions. 
+We also look at the performance on the test sample : 
+
+```{r}
+# Fit the ARIMA(5,1,4) model on the training set
+best_arma_model <- arima(train_data$Close, order = c(5, 1, 4))
+
+# Summary of the ARIMA model
+summary(best_arma_model)
+
+# Make predictions for the training set (fitted values)
+fitted_train <- train_data$Close - residuals(best_arma_model)
+
+# Create a data frame for actual values and in-sample predictions
+plot_data_train <- data.frame(
+  Time = train_data$Date,
+  Observed = train_data$Close,
+  Predicted = fitted_train
+)
+
+# Calculate errors on the training set
+errors_train <- plot_data_train$Observed - plot_data_train$Predicted
+rmse_train <- sqrt(mean(errors_train^2))
+mae_train <- mean(abs(errors_train))
+
+# Display results for the training set
+cat("Performance of the ARIMA(5,1,4) model for the training set:\n")
+cat("RMSE: ", rmse_train, "\n")
+cat("MAE: ", mae_train, "\n")
+
+# Add a column for the years and divide by 5-year periods
+plot_data_train <- plot_data_train %>%
+  mutate(
+    Year = as.numeric(format(Time, "%Y")),
+    Period = paste0(floor(Year / 5) * 5, "-", floor(Year / 5) * 5 + 4)  # 5-year periods
+  )
+
+# Divide the data into 5-year periods
+periods <- unique(plot_data_train$Period)
+
+# Generate a plot for each 5-year period
+for (period in periods) {
+  # Filter data for the current period
+  period_data <- filter(plot_data_train, Period == period)
+  
+  # Generate the plot for the current period
+  p <- ggplot(period_data, aes(x = Time)) +
+    geom_line(aes(y = Observed), color = 'black', linewidth = 1) +  # Observed series in black
+    geom_line(aes(y = Predicted), color = 'blue', linewidth = 1) +  # Predictions in blue
+    labs(
+      title = paste("Comparison of ARIMA(5,1,4) Predictions - Period:", period),
+      x = "Date", y = "Adjusted Value"
+    ) +
+    theme_minimal()
+  
+  # Display the plot
+  print(p)
+}
+
+# Make predictions on the test set (n.ahead = length of test_data)
+predictions_test <- predict(best_arma_model, n.ahead = length(test_data$Close))$pred
+
+# Create a data frame for observed values and test predictions
+plot_data_test <- data.frame(
+  Time = test_data$Date,
+  Observed = test_data$Close,
+  Predicted = predictions_test
+)
+
+# Plot the observed values and predictions for the test set
+ggplot(plot_data_test, aes(x = Time)) +
+  geom_line(aes(y = Observed, color = "Observed"), size = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), linetype = "dashed", size = 1) +
+  labs(title = "Predictions vs Actual Values - Test", x = "Date", y = "Adjusted Value") +
+  scale_color_manual(values = c("Observed" = "blue", "Predicted" = "red")) +
+  theme_minimal()
+
+# Calculate errors on the test set
+errors_test <- plot_data_test$Observed - plot_data_test$Predicted
+
+# Calculate RMSE and MAE for the test set
+rmse_test <- sqrt(mean(errors_test^2))
+mae_test <- mean(abs(errors_test))
+
+# Display results for the test set
+cat("Performance of the ARIMA(5,1,4) model for the test set:\n")
+cat("RMSE: ", rmse_test, "\n")
+cat("MAE: ", mae_test, "\n")
+
+```
+As we can see, the fitted values are really close to the observed ones, with a little lag (which is the specificity of an ARIMA model). 
+However, on the training set, we observe that predictions are constant, which absolute not reflect the increasing trend of the CAC 40 closing prices. 
+
+## on returns of the CAC 40 index
+
+```{r}
+# Define parameters for ARMA models
+p_values <- 1:6  # p values
+q_values <- 1:6  # q values
+
+# Store models and their results
+models <- list()
+valid_models <- list()
+aic_values <- c()
+bic_values <- c()
+box_test_results <- list()
+
+# Fit ARMA models and check for white noise in residuals on the train dataset
+for (p in p_values) {
+  for (q in q_values) {
+    model_name <- paste0("ARMA", p, q)
+    
+    # Fit ARMA(p, q) model on train_data$Return
+    models[[model_name]] <- arima(train_data$Return, order = c(p, 0, q))
+    
+    # Get residuals and perform Ljung-Box test
+    resid <- residuals(models[[model_name]])
+    box_test <- Box.test(resid, lag = 30)
+    
+    # Store test results
+    box_test_results[[model_name]] <- box_test
+    
+    # If residuals are white (p-value > 0.05), add to valid models list
+    if (box_test$p.value > 0.05) {
+      valid_models[[model_name]] <- models[[model_name]]
+      aic_values[model_name] <- AIC(models[[model_name]])
+      bic_values[model_name] <- BIC(models[[model_name]])
+    }
+  }
+}
+
+# Display white noise test results
+cat("White noise test results for residuals (p-value):\n")
+for (model_name in names(box_test_results)) {
+  cat(model_name, ": p-value =", box_test_results[[model_name]]$p.value, "\n")
+}
+
+# Evaluate only valid models
+if (length(valid_models) > 0) {
+  cat("\nAIC and BIC criteria for valid models:\n")
+  aic_results <- data.frame(Model = names(aic_values), AIC = aic_values, BIC = bic_values)
+  print(aic_results[order(aic_results$AIC), ])  # Sort by AIC
+
+  # Identify the best model based on AIC among valid models
+  best_model <- names(which.min(aic_values))
+  cat("\nBest model based on AIC among valid models:", best_model, "\n")
+} else {
+  cat("\nNo model passed the white noise test for residuals.\n")
+}
+
+
+```
+
+
+The best model is an ARMA(2,5)
+Then, we implement this model, and analyse its performance the training sample first :  
+```{r}
+
+arma_model <- arima(train_data$Return, order = c(2, 0, 5))
+
+# Make in-sample predictions (fitted values)
+fitted_train <- train_data$Return - residuals(arma_model)
+
+# Prepare data for ggplot
+plot_data_train <- data.frame(
+  Time = train_data$Date,  # Exclude the first row (log diff)
+  Observed = train_data$Return,   # Log returns series
+  Predicted = fitted_train        # ARMA model predictions
+)
+
+# Add a column to group years by 5-year periods
+plot_data_train <- plot_data_train %>%
+  mutate(
+    Year = as.numeric(format(Time, "%Y")),  # Extract the year
+    Period = paste0(floor(Year / 5) * 5, "-", floor(Year / 5) * 5 + 4)  # Group by 5-year periods
+  )
+
+# Identify all 5-year periods
+periods <- unique(plot_data_train$Period)
+
+# Generate a plot for each 5-year period
+for (period in periods) {
+  # Filter the data for the current period
+  period_data <- filter(plot_data_train, Period == period)
+  
+  # Create the plot
+  p <- ggplot(period_data, aes(x = Time)) +
+    geom_line(aes(y = Observed), color = 'black', linewidth = 1) +  # Observed series in black
+    geom_line(aes(y = Predicted), color = 'blue', linewidth = 1) +  # Predictions in blue
+    labs(
+      title = paste("ARMA Prediction Comparison - Period:", period),
+      x = "Date", 
+      y = "Log-Returns"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  # Display the plot
+  print(p)
+}
+
+# Overall performance on the train set
+errors_train <- plot_data_train$Observed - plot_data_train$Predicted
+rmse_train <- sqrt(mean(errors_train^2))
+mae_train <- mean(abs(errors_train))
+
+cat("Overall performance on the train set:\n")
+cat("RMSE: ", rmse_train, "\n")
+cat("MAE: ", mae_train, "\n")
+
+# Analysis for October 2008
+subsample_month_train <- filter(plot_data_train, Year == 2008 & format(Time, "%m") == "10")
+errors_month_train <- subsample_month_train$Observed - subsample_month_train$Predicted
+rmse_month_train <- sqrt(mean(errors_month_train^2))
+mae_month_train <- mean(abs(errors_month_train))
+
+cat("Performance for October 2008:\n")
+cat("RMSE: ", rmse_month_train, "\n")
+cat("MAE: ", mae_month_train, "\n")
+
+
+```
+Since the predictions are always close to zero, and we take the average over many samples, irregularities are quickly smoothed out, resulting in a very low MAE (be cautious with the scale, as these are log returns). Moreover, when we focus on a specific month (for example, the 2008 financial crisis), we observe that the performance metrics change significantly.
+
+Additionally, the predictions are always delayed (this is inherent to the model chosen), and their intensity is quite low.
+
+Now, let's check the performance on the test set:
+
+```{r}
+# 1. In-sample predictions on the test set using the ARMA model
+forecast_result <- forecast(arma_model, h = length(test_data$Return))
+
+# 2. Extract predictions
+predictions_test <- forecast_result$mean
+
+# 3. Prepare data for ggplot for the test set
+plot_data_test <- data.frame(
+  Time = test_data$Date,
+  Observed = test_data$Return,
+  Predicted = predictions_test
+)
+
+# 4. Transformation to closing prices
+# Last known closing price (end of training set)
+last_train_price <- 6473.76  # Replace with actual closing price if needed
+
+plot_data_test <- plot_data_test %>%
+  mutate(
+    Observed_Price = last_train_price * cumprod(exp(Observed)),  # Transformation of observed log-returns
+    Predicted_Price = last_train_price * cumprod(exp(Predicted))  # Transformation of predicted log-returns
+  )
+
+# 5. Calculate errors for the prices
+errors_test <- plot_data_test$Observed_Price - plot_data_test$Predicted_Price
+
+# Calculate metrics: RMSE and MAE for the test set
+rmse_test <- sqrt(mean(errors_test^2, na.rm = TRUE))
+mae_test <- mean(abs(errors_test), na.rm = TRUE)
+
+# Display the results for the test set
+cat("Performance of the ARMA model on closing prices for the test set:\n")
+cat("RMSE (Price): ", rmse_test, "\n")
+cat("MAE (Price): ", mae_test, "\n")
+
+# 7. Plot of closing prices
+ggplot(plot_data_test, aes(x = Time)) +
+  geom_line(aes(y = Observed_Price, color = "Observed Price"), linewidth = 1) +  # Observed prices in black
+  geom_line(aes(y = Predicted_Price, color = "Predicted Price"), linewidth = 1) +  # Predicted prices in blue
+  labs(title = "ARMA Predictions on Closing Prices (Test Set)",
+       x = "Date", y = "Closing Prices") +
+  scale_color_manual(values = c("Observed Price" = "black", "Predicted Price" = "blue")) +
+  theme_minimal()
+
+
+```
+
+# ARMAX model 
+
+Since the ARMA model doesn't perform well on both training and test set, we want to implement an ARMAX model on the returns of the CAC 40 index. By adding variables to this model, we hope that it will capture trend and downfalls like crisis (because we saw on the last graph that it was not the case)
+
+
+We select the best combination of variables among the I(1) variables (for now) on the training set (I(1) variables are find in the written presentation and in the ARDL code, thanks to a KPSS test). The metric to minimize is the RMSE on the training sample : 
+
+```{r}
+# List of I(1) variables
+variables_I1 <- c("GDPV", "CPIH_YTYPCT", "UNR_us", "High_minus_Low", "SMA_5",
+                  "SMA_10", "SMA_20", "WMA_5", "WMA_10", "WMA_20", "RSI", "Williams_R", "MACD")
+
+# Function to prepare differenced data
+prepare_diff_data <- function(data, vars) {
+  data %>%
+    dplyr::select(all_of(vars)) %>%
+    mutate(across(everything(), ~ c(NA, diff(.)))) %>%
+    filter(complete.cases(.))
+}
+
+# Initialize results
+results <- data.frame(Combination = character(), RMSE_train = numeric(), MAE_train = numeric(), stringsAsFactors = FALSE)
+
+# Test all combinations of 1 to 4 variables
+combinations <- unlist(lapply(1:4, function(k) combn(variables_I1, k, simplify = FALSE)), recursive = FALSE)
+
+# First known closing price for the training set
+first_train_price <- 5917.37
+
+# Loop through each combination
+for (comb in combinations) {
+  # Prepare the differenced data for the train set
+  exog_train <- prepare_diff_data(train_data, comb)
+  
+  # Skip if exogenous data does not match in size
+  if (nrow(exog_train) != nrow(train_data) - 1) next
+  
+  # Adjust the dependent variable
+  dependent_var_train <- train_data$Return[-1]
+  
+  # Fit the ARMAX model
+  armax_model <- tryCatch(
+    arima(dependent_var_train, order = c(2, 0, 5), xreg = as.matrix(exog_train)),
+    error = function(e) NULL
+  )
+  
+  # Check if the model was successfully fitted
+  if (is.null(armax_model)) next
+  
+  # Predictions on the training set (one-step-ahead for each observation)
+  predictions_train <- tryCatch(
+    fitted(armax_model),
+    error = function(e) NULL
+  )
+  
+  # Check if predictions were made
+  if (is.null(predictions_train)) next
+  
+  # Convert to closing prices
+  observed_prices_train <- first_train_price * cumprod(exp(dependent_var_train))
+  predicted_prices_train <- first_train_price * cumprod(exp(predictions_train))
+  
+  # Calculate the errors on the training set
+  errors_prices_train <- observed_prices_train - predicted_prices_train
+  rmse_train <- sqrt(mean(errors_prices_train^2, na.rm = TRUE))
+  mae_train <- mean(abs(errors_prices_train), na.rm = TRUE)
+  
+  # Add the results
+  results <- rbind(results, data.frame(
+    Combination = paste(comb, collapse = ", "),
+    RMSE_train = rmse_train,
+    MAE_train = mae_train,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Identify the best model on the training set
+best_model <- results[which.min(results$RMSE_train), ]
+
+# Display the results
+cat("Best model found on the training set:\n")
+print(best_model)
+
+# Display all results sorted by RMSE on the training set
+results <- results[order(results$RMSE_train), ]
+print(head(results, 20))  # Top 20 models
+
+```
+
+
+We add the I(0) variables to test the combinations, by adding a maximum of 4 I(0) variables to the best combinations found before :
+
+```{r}
+# I(0) Variables
+variables_I0 <- c("Close_minus_Open", "Momentum", "Stochastic_K", "Stochastic_D", "CCI")
+
+
+# Best I(1) Variable Combinations
+best_combinations_I1 <- list(
+  c("CPIH_YTYPCT", "UNR_us", "High_minus_Low", "SMA_5"),
+  c("CPIH_YTYPCT", "UNR_us", "WMA_5", "MACD"),
+  c("CPIH_YTYPCT", "UNR_us", "High_minus_Low", "WMA_5"),
+  c("CPIH_YTYPCT", "UNR_us", "SMA_5"),
+  c("CPIH_YTYPCT", "UNR_us", "WMA_5"),
+  c("CPIH_YTYPCT", "UNR_us", "SMA_5", "Williams_R"),
+  c("CPIH_YTYPCT", "UNR_us", "SMA_5", "RSI"),
+  c("GDPV", "CPIH_YTYPCT", "UNR_us"),
+  c("UNR_us", "High_minus_Low", "SMA_5", "MACD"),
+  c("CPIH_YTYPCT", "UNR_us", "WMA_5", "Williams_R")
+)
+
+# Function to prepare differenced data (only for I(1))
+prepare_diff_data_I1 <- function(data, vars) {
+  data %>%
+    dplyr::select(all_of(vars)) %>%
+    mutate(across(everything(), ~ c(NA, diff(.)))) %>%
+    filter(complete.cases(.))
+}
+
+# Initialize results
+results <- data.frame(Combination = character(), RMSE_train = numeric(), MAE_train = numeric(), stringsAsFactors = FALSE)
+
+# First known closing price for the training set
+first_train_price <- 5917.37
+
+# Test each I(1) combination enriched with I(0) variables
+for (comb_I1 in best_combinations_I1) {
+  for (k in 1:4) {  # Add 1 to 4 I(0) variables
+    comb_I0 <- combn(variables_I0, k, simplify = FALSE)
+    
+    for (extra_vars in comb_I0) {
+      # Total combination
+      total_combination <- c(comb_I1, extra_vars)
+      
+      # Prepare differenced data for I(1) variables
+      exog_train_I1 <- prepare_diff_data_I1(train_data, comb_I1)
+      
+      # Extract the I(0) variables without differencing
+      exog_train_I0 <- train_data %>%
+        dplyr::select(all_of(extra_vars)) %>%
+        filter(row_number() > 1)  # Align with differenced data
+      
+      # Check if the data sizes match
+      if (nrow(exog_train_I1) != nrow(exog_train_I0)) next
+      
+      # Combine the I(1) differenced and I(0) raw variables
+      exog_train <- cbind(exog_train_I1, exog_train_I0)
+      
+      # Adjust the dependent variable
+      dependent_var_train <- train_data$Return[-1]
+      
+      # Fit the ARMAX model
+      armax_model <- tryCatch(
+        arima(dependent_var_train, order = c(2, 0, 5), xreg = as.matrix(exog_train)),
+        error = function(e) NULL
+      )
+      
+      # Check if the model was successfully fitted
+      if (is.null(armax_model)) next
+      
+      # Predictions on the training set (one-step-ahead for each observation)
+      predictions_train <- tryCatch(
+        fitted(armax_model),
+        error = function(e) NULL
+      )
+      
+      # Check if the predictions were made
+      if (is.null(predictions_train)) next
+      
+      # Transform to closing prices
+      observed_prices_train <- first_train_price * cumprod(exp(dependent_var_train))
+      predicted_prices_train <- first_train_price * cumprod(exp(predictions_train))
+      
+      # Calculate the errors on the training set
+      errors_prices_train <- observed_prices_train - predicted_prices_train
+      rmse_train <- sqrt(mean(errors_prices_train^2, na.rm = TRUE))
+      mae_train <- mean(abs(errors_prices_train), na.rm = TRUE)
+      
+      # Add results
+      results <- rbind(results, data.frame(
+        Combination = paste(total_combination, collapse = ", "),
+        RMSE_train = rmse_train,
+        MAE_train = mae_train,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+}
+
+# Identify the best model on the training set
+best_model <- results[which.min(results$RMSE_train), ]
+
+# Display results
+cat("Best model found on the training set:\n")
+print(best_model)
+
+# Display the top 20 models
+results <- results[order(results$RMSE_train), ]
+print(head(results, 20))
+
+```
+
+Now, we select the best combination of variables found, we launch this model and observe its performances on the test set; then, we can be able to judge if the ARMAX model perform better than the ARMA one. 
+
+```{r}
+# Variables for the selected combination
+selected_I1 <- c("CPIH_YTYPCT", "UNR_us", "SMA_5")
+selected_I0 <- c("Close_minus_Open", "Momentum", "Stochastic_K", "CCI")
+
+# Function to prepare differenced data (only for I(1))
+prepare_diff_data_I1 <- function(data, vars) {
+  data %>%
+    dplyr::select(all_of(vars)) %>%
+    mutate(across(everything(), ~ c(NA, diff(.)))) %>%
+    filter(complete.cases(.))
+}
+
+# Prepare differenced data for train and test
+exog_train_I1 <- prepare_diff_data_I1(train_data, selected_I1)
+exog_test_I1 <- prepare_diff_data_I1(test_data, selected_I1)
+
+# Prepare the I(0) variables for train and test
+exog_train_I0 <- train_data %>%
+  dplyr::select(all_of(selected_I0)) %>%
+  filter(row_number() > 1)  # Align with I(1)
+
+exog_test_I0 <- test_data %>%
+  dplyr::select(all_of(selected_I0)) %>%
+  filter(row_number() > 1)  # Align with I(1)
+
+# Check if the sizes match
+if (nrow(exog_train_I1) != nrow(exog_train_I0) || nrow(exog_test_I1) != nrow(exog_test_I0)) {
+  stop("The sizes of the train/test data do not match.")
+}
+
+# Combine the I(1) differenced data and I(0) raw data
+exog_train <- cbind(exog_train_I1, exog_train_I0)
+exog_test <- cbind(exog_test_I1, exog_test_I0)
+
+# Adjust the dependent variable for train
+dependent_var_train <- train_data$Return[-1]
+
+# Fit the ARMAX model
+armax_model <- tryCatch(
+  arima(dependent_var_train, order = c(2, 0, 5), xreg = as.matrix(exog_train)),
+  error = function(e) stop("Error fitting the model: ", e)
+)
+
+# Predictions on the test set
+predictions_test <- tryCatch(
+  predict(armax_model, n.ahead = nrow(exog_test), newxreg = as.matrix(exog_test))$pred,
+  error = function(e) stop("Error during predictions: ", e)
+)
+
+# Last known closing price for the test set
+last_train_price <- 6473.76
+
+# Calculate observed and predicted prices
+observed_prices_test <- last_train_price * cumprod(exp(test_data$Return[-1]))
+predicted_prices_test <- last_train_price * cumprod(exp(predictions_test))
+
+# Calculate errors
+errors_prices_test <- observed_prices_test - predicted_prices_test
+rmse_test <- sqrt(mean(errors_prices_test^2, na.rm = TRUE))
+mae_test <- mean(abs(errors_prices_test), na.rm = TRUE)
+
+# Calculate R-squared (coefficient of determination)
+ss_total_test <- sum((observed_prices_test - mean(observed_prices_test, na.rm = TRUE))^2, na.rm = TRUE)  # Total sum of squares
+ss_residual_test <- sum(errors_prices_test^2, na.rm = TRUE)  # Sum of squared residuals
+r_squared_test <- 1 - (ss_residual_test / ss_total_test)  # R-squared
+
+# Display performance metrics
+cat("Performance metrics on the test set:\n")
+cat("RMSE:", rmse_test, "\n")
+cat("MAE:", mae_test, "\n")
+cat("R-squared:", r_squared_test, "\n")
+
+# Plot observed vs predicted prices
+library(ggplot2)
+df_plot <- data.frame(
+  Date = test_data$Date[-1], 
+  Observed = observed_prices_test,
+  Predicted = predicted_prices_test
+)
+
+ggplot(df_plot, aes(x = Date)) +
+  geom_line(aes(y = Observed, color = "Observed price")) +
+  geom_line(aes(y = Predicted, color = "Predicted price")) +
+  labs(
+    title = "Actual vs predicted prices on the test set",
+    x = "Date",
+    y = "Prices",
+    color = "Caption"
+  ) +
+  theme_minimal()
+```
+
+We can see that the ARMAX model perform better than the ARMA one. Trends are represented as we can see on the graph. However, we observe a decreasing trend, which is not the case in the closing prices (we can even see the contrary).
