@@ -731,7 +731,7 @@ def prepare_forecast_data(option, start_forecast, end_date):
 
 def predict():
 
-    end_forecast = date.today() + timedelta(days=1)
+    end_forecast = min(date.today(), max_date) + timedelta(days=1)
     while end_forecast.weekday() in [5, 6]:  # Skip weekends
         end_forecast += timedelta(days=1)
 
@@ -750,7 +750,7 @@ def predict():
     data_FL = prepare_forecast_data(option, start_FL, end_zoom)
 
     # Set the last close as NaN if index date equals today + 1
-    next_trading_day = date.today() #+ timedelta(days=1)
+    next_trading_day = min(date.today(), max_date) #+ timedelta(days=1)
     while next_trading_day.weekday() in [5, 6]:  # Skip weekends
         next_trading_day += timedelta(days=1)
 
