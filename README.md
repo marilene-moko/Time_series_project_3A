@@ -66,7 +66,7 @@ Their creation is implemented in the `Process_data.ipynb` file.
 ## Application
 
 One of the objectives of the project is to deploy an application for the best model in a real-world trading environment as part of a trading system or to use it for investment decision support.  
-For this purpose, we created a Streamlit application deploy on [cac40forecast.app](https://cac40forecast.streamlit.app/)
+For this purpose, we created a Streamlit application deploy on [cac40forecast.app](https://timeseriesproject3a-marilene-moko.streamlit.app/)
 
 ## Setup
 
